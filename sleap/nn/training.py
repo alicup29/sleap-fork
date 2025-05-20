@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from datetime import datetime
 from time import time
@@ -78,6 +79,10 @@ from sleap.nn.losses import OHKMLoss, PartLoss
 from sleap.nn.model import Model
 from sleap.nn.viz import plot_confmaps, plot_peaks
 from sleap.util import get_package_file, plot_img
+
+# webRTC
+import asyncio
+from sleap_client.client import run_client  # adjust import path
 
 logger = logging.getLogger(__name__)
 
@@ -1899,8 +1904,21 @@ def create_trainer_using_cli(args: Optional[List] = None):
         default="",
         help="Run name to use when saving file, overrides other run name settings.",
     )
-    parser.add_argument("--prefix", default="", help="Prefix to prepend to run name.")
-    parser.add_argument("--suffix", default="", help="Suffix to append to run name.")
+    parser.add_argument(
+        "--prefix",
+        default="", 
+        help="Prefix to prepend to run name."
+    )
+    parser.add_argument(
+        "--suffix",
+        default="", 
+        help="Suffix to append to run name."
+    )
+    parser.add_argument(
+        "--remote_worker",
+        action="store_true",
+        help="Run the training job on a remote worker. This is not yet implemented.",
+    )
 
     device_group = parser.add_mutually_exclusive_group(required=False)
     device_group.add_argument(
@@ -1969,6 +1987,11 @@ def create_trainer_using_cli(args: Optional[List] = None):
     if args.base_checkpoint is not None:
         job_config.model.base_checkpoint = args.base_checkpoint
 
+    if args.remote_worker != "":
+        job_config.outputs.remote_worker = args.remote_worker
+        job_config.outputs.remote_worker.job_path = job_filename
+        job_config.outputs.remote_worker.labels_path = args.labels_path
+
     logger.info("Versions:")
     sleap.versions()
 
@@ -2035,10 +2058,61 @@ def create_trainer_using_cli(args: Optional[List] = None):
     return trainer
 
 
+async def run_remote_worker(trainer):
+    """Run the remote worker."""
+    # tmp_dir = tempfile.TemporaryDirectory()
+    # tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    # tmp_zip.close()  # Close so shutil can write to it
+
+    train_script = "#!/bin/bash\n"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        job_path = trainer.config.remote_worker.job_path
+        labels_path = trainer.config.remote_worker.labels_path
+
+        # Copy files to temp dir.
+        shutil.copy(job_path, os.path.join(temp_dir, os.path.basename(job_path)))
+        shutil.copy(labels_path, os.path.join(temp_dir, os.path.basename(labels_path)))
+
+        # Generate training script.
+        train_script += (
+            f"sleap-train {job_path} {labels_path}\n"
+        )
+
+        with open(os.path.join(temp_dir, "train-script.sh"), "w") as f:
+            f.write(train_script)
+
+        train_script_path = os.path.abspath("train-script.sh")
+        shutil.copy(train_script_path, os.path.join(temp_dir, "train-script.sh"))
+
+        # Zip all files.
+        zip_name =f"{datetime.now().strftime('%y%m%d_%H%M%S')}.zip"
+        zip_path = os.path.join(temp_dir, zip_name)
+        shutil.make_archive(zip_path.replace(".zip", ""), "zip", temp_dir)
+
+        # Upload zip to remote worker for training.
+        await run_client(
+            peer_id="client1", 
+            DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com", 
+            port_number=8080, 
+            file_path=zip_name,
+            CLI=False
+        )
+
+        return
+
+
+
 def main(args: Optional[List] = None):
     """Create CLI for training and run."""
     trainer = create_trainer_using_cli(args=args)
-    trainer.train()
+
+    # Check for remote worker.
+    if trainer.config.outputs.remote_worker:
+        logger.info("Running remote worker...")
+        asyncio.run(run_remote_worker(trainer))
+    else:
+        trainer.train()
 
 
 if __name__ == "__main__":
