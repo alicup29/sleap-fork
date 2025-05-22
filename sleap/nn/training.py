@@ -82,6 +82,7 @@ from sleap.util import get_package_file, plot_img
 
 # webRTC
 import asyncio
+import zipfile
 from sleap_client.client import run_client  # adjust import path
 
 logger = logging.getLogger(__name__)
@@ -1989,8 +1990,9 @@ def create_trainer_using_cli(args: Optional[List] = None):
 
     if args.remote_worker != "":
         job_config.outputs.remote_worker = args.remote_worker
-        job_config.outputs.remote_worker.job_path = job_filename
-        job_config.outputs.remote_worker.labels_path = args.labels_path
+        job_config.outputs.job_path = job_filename
+        job_config.outputs.labels_path = args.labels_path
+        job_config.outputs.video_paths = args.video_paths
 
     logger.info("Versions:")
     sleap.versions()
@@ -2058,8 +2060,26 @@ def create_trainer_using_cli(args: Optional[List] = None):
     return trainer
 
 
+def zip_files(file1, file2, file3, output):
+    logger.info(f"Zipping {file1}, {file2}, and {file3}...")
+    """Zips three files into a single archive."""
+    try:
+        with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+            zf.write(file1, arcname=os.path.basename(file1))
+            zf.write(file2, arcname=os.path.basename(file2))
+            zf.write(file3, arcname=os.path.basename(file3))
+        print(f"Successfully zipped '{file1}' and '{file2}' into '{output}'.")
+        return output
+    except FileNotFoundError:
+        print(f"Error: One or more input files not found.")
+        return None
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+
 async def run_remote_worker(trainer):
-    """Run the remote worker."""
+    """Run sleap-train on remote worker."""
     # tmp_dir = tempfile.TemporaryDirectory()
     # tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
     # tmp_zip.close()  # Close so shutil can write to it
@@ -2067,35 +2087,49 @@ async def run_remote_worker(trainer):
     train_script = "#!/bin/bash\n"
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        job_path = trainer.config.remote_worker.job_path
-        labels_path = trainer.config.remote_worker.labels_path
-
-        # Copy files to temp dir.
-        shutil.copy(job_path, os.path.join(temp_dir, os.path.basename(job_path)))
-        shutil.copy(labels_path, os.path.join(temp_dir, os.path.basename(labels_path)))
+        # Obtain paths to training job and labels.
+        job_path = trainer.config.outputs.job_path
+        labels_path = trainer.config.outputs.labels_path
 
         # Generate training script.
         train_script += (
-            f"sleap-train {job_path} {labels_path}\n"
+            f"sleap-train {os.path.basename(job_path)} {os.path.basename(labels_path)}\n"
         )
 
-        with open(os.path.join(temp_dir, "train-script.sh"), "w") as f:
+        train_script_path = os.path.join(temp_dir, "train-script.sh")
+
+        # Write training script to temp dir.
+        with open(train_script_path, "w") as f:
             f.write(train_script)
 
-        train_script_path = os.path.abspath("train-script.sh")
-        shutil.copy(train_script_path, os.path.join(temp_dir, "train-script.sh"))
+        # Make the script executable.
+        os.chmod(train_script_path, 0o755)
+        # train_script_path = os.path.abspath("train-script.sh")
+        # shutil.copy(train_script_path, os.path.join(temp_dir, "train-script.sh"))
 
         # Zip all files.
-        zip_name =f"{datetime.now().strftime('%y%m%d_%H%M%S')}.zip"
-        zip_path = os.path.join(temp_dir, zip_name)
-        shutil.make_archive(zip_path.replace(".zip", ""), "zip", temp_dir)
+        zip_path = os.path.join(temp_dir, "training_job.zip")
+        training_zip = zip_files(
+            job_path,
+            labels_path,
+            train_script_path,
+            zip_path,
+        )
+
+        if training_zip is None:
+            raise RuntimeError("Failed to create training zip file.")
+        
+        # zip_path = os.path.join(temp_dir, "training_job.zip")
+        # zip_with_zip64(zip_path, temp_dir)
+
+        logger.info(f"Zipped training job to {zip_path}")
 
         # Upload zip to remote worker for training.
         await run_client(
             peer_id="client1", 
             DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com", 
             port_number=8080, 
-            file_path=zip_name,
+            file_path=training_zip,
             CLI=False
         )
 
