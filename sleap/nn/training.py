@@ -1,4 +1,6 @@
 """Training functionality and high level APIs."""
+import sys
+sys.path.insert(0, "/Users/amickl/repos/sleap-fork")
 
 import copy
 import json
@@ -80,6 +82,11 @@ from sleap.nn.viz import plot_confmaps, plot_peaks
 from sleap.util import get_package_file, plot_img
 
 logger = logging.getLogger(__name__)
+
+# sleapRTC
+import asyncio
+from qtpy import QtWidgets
+from sleap.gui.learning.dialog import LearningDialog
 
 
 @attr.s(auto_attribs=True)
@@ -1901,6 +1908,14 @@ def create_trainer_using_cli(args: Optional[List] = None):
     )
     parser.add_argument("--prefix", default="", help="Prefix to prepend to run name.")
     parser.add_argument("--suffix", default="", help="Suffix to append to run name.")
+    parser.add_argument(
+        "--remote_worker",
+        action="store_true",
+        help=(
+            "Run a remote worker for training. This is used for distributed training "
+            "where the GUI is not available."
+        ),
+    )
 
     device_group = parser.add_mutually_exclusive_group(required=False)
     device_group.add_argument(
@@ -1969,11 +1984,17 @@ def create_trainer_using_cli(args: Optional[List] = None):
     if args.base_checkpoint is not None:
         job_config.model.base_checkpoint = args.base_checkpoint
 
+    # if args.remote_worker != "": # remove later
+    #     job_config.outputs.remote_worker = args.remote_worker
+    #     job_config.outputs.job_path = job_filename
+    #     job_config.outputs.labels_path = args.labels_path
+    #     job_config.outputs.video_paths = args.video_paths
+
     logger.info("Versions:")
     sleap.versions()
 
-    logger.info(f"Training labels file: {args.labels_path}")
-    logger.info(f"Training profile: {job_filename}")
+    logger.info(f"Training labels file: {args.labels_path}") # ex. dancing_labels.v001.pkg.slp
+    logger.info(f"Training profile: {job_filename}") # ex. centroid.json
     logger.info("")
 
     # Log configuration to console.
@@ -2032,13 +2053,67 @@ def create_trainer_using_cli(args: Optional[List] = None):
         video_search_paths=args.video_paths,
     )
 
-    return trainer
+    if args.remote_worker != "":
+        # If running as a remote worker, set up the GUI.
+        run_remote_worker(
+            labels_file=args.labels_path,
+            config_file=job_config # type: TrainingJobConfig
+        )
+        return
+    else:
+        return trainer
+
+
+def run_remote_worker(labels_file: str, config_file: TrainingJobConfig):
+    """Run a remote worker for training."""
+
+    # Create a QApplication instance to run LearningDialog function.
+    app = QtWidgets.QApplication([]) 
+    dialog = LearningDialog(mode='training', labels_filename=labels_file)
+
+    # Determine the model head type from the configuration.
+    head_config = config_file.model.heads.which_oneof()
+    head_name = ""
+    
+    # Determine output type to create type-specific model trainer.
+    if isinstance(head_config, SingleInstanceConfmapsHeadConfig):
+        head_name = "single_instance"
+    elif isinstance(head_config, CentroidsHeadConfig):
+        head_name = "centroid"
+    elif isinstance(head_config, CenteredInstanceConfmapsHeadConfig):
+        head_name = "centered_instance"
+    elif isinstance(head_config, MultiInstanceConfig):
+        head_name = "multi_instance"
+    elif isinstance(head_config, MultiClassBottomUpConfig):
+        head_name = "multi_class_bottomup"
+    elif isinstance(head_config, MultiClassTopDownConfig):
+        head_name = "multi_class_topdown"
+    else:
+        raise ValueError(
+            "Model head not specified or configured. Check the config.model.heads"
+            " setting."
+        )
+    print(f"---------------Using {head_name} head config---------------")
+
+    asyncio.run(
+        dialog.remote_worker(
+            config_filename=config_file, # pass the TrainingJobConfig object
+            cfg_head_name=head_name, # pass the model head name
+            gui=False, # disable GUI for remote worker since CLI
+        )
+    )
+
+    return 
 
 
 def main(args: Optional[List] = None):
     """Create CLI for training and run."""
     trainer = create_trainer_using_cli(args=args)
-    trainer.train()
+
+    if trainer is None:
+        logger.info("No trainer created. Exiting.")
+    else:
+        trainer.train()
 
 
 if __name__ == "__main__":

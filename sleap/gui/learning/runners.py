@@ -398,6 +398,7 @@ def write_pipeline_files(
 
     # Add head type to save path suffix to prevent overwriting.
     for cfg_info in config_info_list:
+        print("-----------------", cfg_info)
         if not cfg_info.dont_retrain:
             if (
                 cfg_info.config.outputs.run_name_suffix is not None
@@ -409,6 +410,8 @@ def write_pipeline_files(
                 suffix = ""
 
             # Add head name.
+            print("cfg_info.head_name", cfg_info.head_name)
+            print("suffix", suffix)
             suffix = "." + cfg_info.head_name + suffix
 
             # Update config.
