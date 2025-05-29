@@ -14,6 +14,7 @@ from datetime import datetime
 from time import time
 from typing import Callable, List, Optional, Text, TypeVar, Union
 
+import asyncio
 import attr
 import cattr
 
@@ -84,9 +85,9 @@ from sleap.util import get_package_file, plot_img
 logger = logging.getLogger(__name__)
 
 # sleapRTC
-import asyncio
 from qtpy import QtWidgets
 from sleap.gui.learning.dialog import LearningDialog
+from sleap_client.client import run_client
 
 
 @attr.s(auto_attribs=True)
@@ -1910,10 +1911,11 @@ def create_trainer_using_cli(args: Optional[List] = None):
     parser.add_argument("--suffix", default="", help="Suffix to append to run name.")
     parser.add_argument(
         "--remote_worker",
-        action="store_true",
+        nargs="?",
+        default="",
         help=(
-            "Run a remote worker for training. This is used for distributed training "
-            "where the GUI is not available."
+            "Path to training job package or labels file for a remote worker. If specified,"
+            "overrides the path in the training job config."
         ),
     )
 
@@ -1984,12 +1986,6 @@ def create_trainer_using_cli(args: Optional[List] = None):
     if args.base_checkpoint is not None:
         job_config.model.base_checkpoint = args.base_checkpoint
 
-    # if args.remote_worker != "": # remove later
-    #     job_config.outputs.remote_worker = args.remote_worker
-    #     job_config.outputs.job_path = job_filename
-    #     job_config.outputs.labels_path = args.labels_path
-    #     job_config.outputs.video_paths = args.video_paths
-
     logger.info("Versions:")
     sleap.versions()
 
@@ -2053,18 +2049,36 @@ def create_trainer_using_cli(args: Optional[List] = None):
         video_search_paths=args.video_paths,
     )
 
-    if args.remote_worker != "":
+    if args.remote_worker != "" and args.remote_worker.endswith(".zip"):
+        asyncio.run(
+            run_client(
+                peer_id="client1", 
+                DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com", 
+                port_number=8080, 
+                file_path=args.remote_worker,
+                CLI=False # refers to sleapRTC Client CLI, not sleap-train CLI
+            )
+        )
+        return None
+    elif args.remote_worker != "":
+        # Check for labels file
+        if args.labels_path is None:
+            if job_config.data.labels_file is None:
+                raise ValueError(
+                    "No labels file specified in the training job config or CLI arguments."
+                )
+
         # If running as a remote worker, set up the GUI.
         run_remote_worker(
-            labels_file=args.labels_path,
-            config_file=job_config # type: TrainingJobConfig
+            config_file=job_config, # type: TrainingJobConfig
+            labels_file=args.labels_path, # if not specified, will use the one in job_config
         )
-        return
+        return None
     else:
         return trainer
 
 
-def run_remote_worker(labels_file: str, config_file: TrainingJobConfig):
+def run_remote_worker(config_file: TrainingJobConfig, labels_file: str):
     """Run a remote worker for training."""
 
     # Create a QApplication instance to run LearningDialog function.
@@ -2099,7 +2113,7 @@ def run_remote_worker(labels_file: str, config_file: TrainingJobConfig):
         dialog.remote_worker(
             config_filename=config_file, # pass the TrainingJobConfig object
             cfg_head_name=head_name, # pass the model head name
-            gui=False, # disable GUI for remote worker since CLI
+            gui=False, # disable GUI for remote worker since using sleap-train CLI
         )
     )
 
@@ -2111,7 +2125,7 @@ def main(args: Optional[List] = None):
     trainer = create_trainer_using_cli(args=args)
 
     if trainer is None:
-        logger.info("No trainer created. Exiting.")
+        logger.info("Remote worker finished running.")
     else:
         trainer.train()
 
