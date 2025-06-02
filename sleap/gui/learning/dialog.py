@@ -824,13 +824,8 @@ class LearningDialog(QtWidgets.QDialog):
 
         if labels_filename is None:
             labels_filename = self.labels_filename
-
-        print(output_dir)
-        print(labels_filename)
-        print(config_info_list)
-        print(pipeline_form_data)
-        print(items_for_inference)
-
+    
+        # Write pipeline files.
         runners.write_pipeline_files(
             output_dir=output_dir,
             labels_filename=labels_filename,
@@ -840,12 +835,20 @@ class LearningDialog(QtWidgets.QDialog):
         )
 
     async def remote_worker(
-            self, 
-            config_filename: TrainingJobConfig = None, 
-            cfg_head_name: Text = None, 
-            gui: bool = True
-        ):
-        """Run pipeline on remote worker (GPU cluster)."""
+        self, 
+        config_filename: TrainingJobConfig = None, 
+        cfg_head_name: Text = None, 
+        gui: bool = True
+    ):
+        """
+        Run pipeline on remote worker (GPU cluster).
+
+        Args:
+            config_filename: The training job config file to use.
+            cfg_head_name: The head name of the config file.
+            gui: If True, use sleap-label GUI for exporting dataset and saving scripts.
+        """
+
         # Create temp dir before packaging.
         tmp_dir = tempfile.TemporaryDirectory()
         tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
@@ -863,15 +866,6 @@ class LearningDialog(QtWidgets.QDialog):
             ):
                 include_suggestions = True
 
-        # Save dataset with images & check suffix.
-        # if not self.labels_filename.endswith(".pkg.slp"):
-        #     labels_pkg_filename = str(
-        #         Path(self.labels_filename).with_suffix(".pkg.slp").name
-        #     )
-        # else:
-        #     labels_pkg_filename = self.labels_filename
-        #     # convert to .pkg.slp if not already using the export labels function
-        #     # first req. .pkg.slp instead of converting 
         labels_pkg_filename = str(
             Path(self.labels_filename).with_suffix(".pkg.slp").name
         )
@@ -912,13 +906,6 @@ class LearningDialog(QtWidgets.QDialog):
             pipeline_form_data = self.pipeline_form_widget.get_form_data()
 
             # Write pipeline files
-            # print("------------------------")
-            # print(tmp_dir.name)
-            # print(labels_pkg_filename)
-            # print(cfg_info_list)
-            # print(pipeline_form_data)  # inference_params
-            # print(items_for_inference)
-
             runners.write_pipeline_files(
                 output_dir=tmp_dir.name, # Temporary directory
                 labels_filename=labels_pkg_filename, # .pkg.slp
@@ -947,7 +934,7 @@ class LearningDialog(QtWidgets.QDialog):
             port_number=8080, 
             file_path=tmp_zip.name,
             CLI=False,
-            output_path=runs_folder,  # where to save the results
+            output_dir=runs_folder,  # where to save the results
         )
 
         # Close training editor.

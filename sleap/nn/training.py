@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from time import time
 from typing import Callable, List, Optional, Text, TypeVar, Union
+from qtpy import QtWidgets
 
 import asyncio
 import attr
@@ -41,10 +42,15 @@ from sleap.nn.callbacks import (
     TrainingControllerZMQ,
 )
 
+from sleap.gui.learning.dialog import (
+    LearningDialog
+) 
+
 # Outputs
 # Optimization
 # Data
 # Config
+# sleapRTC
 from sleap.nn.config import (
     CenteredInstanceConfmapsHeadConfig,
     CentroidsHeadConfig,
@@ -82,12 +88,10 @@ from sleap.nn.model import Model
 from sleap.nn.viz import plot_confmaps, plot_peaks
 from sleap.util import get_package_file, plot_img
 
-logger = logging.getLogger(__name__)
-
 # sleapRTC
-from qtpy import QtWidgets
-from sleap.gui.learning.dialog import LearningDialog
 from sleap_client.client import run_client
+
+logger = logging.getLogger(__name__)
 
 
 @attr.s(auto_attribs=True)
@@ -2049,21 +2053,22 @@ def create_trainer_using_cli(args: Optional[List] = None):
         video_search_paths=args.video_paths,
     )
 
-    if args.remote_worker != "" and args.remote_worker.endswith(".zip"):
+    if args.remote_worker != None and args.remote_worker != "" and args.remote_worker.endswith(".zip"):
         asyncio.run(
             run_client(
                 peer_id="client1", 
                 DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com", 
                 port_number=8080, 
                 file_path=args.remote_worker,
-                CLI=False # refers to sleapRTC Client CLI, not sleap-train CLI
+                CLI=False, # refers to sleapRTC Client CLI, not sleap-train CLI
+                output_dir=job_config.outputs.runs_folder, # will use the default output directory
             )
         )
         return None
     elif args.remote_worker != "":
         # Check for labels file
         if args.labels_path is None:
-            if job_config.data.labels_file is None:
+            if job_config.data.training_labels is None:
                 raise ValueError(
                     "No labels file specified in the training job config or CLI arguments."
                 )
