@@ -451,8 +451,8 @@ def write_pipeline_files(
 
             # Add a line to the script for training this model
             train_script += (
-                f"sleap-train {new_cfg_filename} {os.path.basename(labels_filename)}\n"
-            )
+                f"sleap-train {new_cfg_filename} {os.path.basename(labels_filename)} --zmq --controller_port 9000 --publish_port 9001\n"
+            ) # remove hardcoded zmq flag and ports 
 
             # Setup job params
             training_jobs.append(
