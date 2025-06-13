@@ -6,9 +6,12 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
+import threading
 from typing import Dict, List, Optional, Text, cast
 
+from aiortc import RTCPeerConnection # remove
 import cattr
+from qasync import QEventLoop, asyncSlot # remove
 from qtpy import QtCore, QtGui, QtWidgets
 
 import sleap
@@ -16,6 +19,7 @@ from sleap import Labels, Video
 from sleap.gui.dialogs.filedialog import FileDialog
 from sleap.gui.dialogs.formbuilder import YamlFormWidget
 from sleap.gui.learning import configs, datagen, receptivefield, runners, scopedkeydict
+from sleap.gui.widgets.monitor import LossViewer
 from sleap.nn.config.training_job import TrainingJobConfig
 
 from sleap_client.client import run_client
@@ -170,7 +174,7 @@ class LearningDialog(QtWidgets.QDialog):
         self.export_button.clicked.connect(self.export_package)
         self.cancel_button.clicked.connect(self.reject)
         self.run_button.clicked.connect(self.run)
-        self.remote_button.clicked.connect(lambda: asyncio.run(self.remote_worker))
+        self.remote_button.clicked.connect(self.remote_worker)
 
         # Connect button for previewing the training data
         if "_view_datagen" in self.pipeline_form_widget.buttons:
@@ -834,7 +838,7 @@ class LearningDialog(QtWidgets.QDialog):
             items_for_inference=items_for_inference,
         )
 
-    async def remote_worker(
+    def remote_worker(
         self, 
         config_filename: TrainingJobConfig = None, 
         cfg_head_name: Text = None, 
@@ -893,7 +897,7 @@ class LearningDialog(QtWidgets.QDialog):
         if gui:
             self.save(tmp_dir.name, labels_filename=labels_pkg_filename)
 
-        # Given config and config head name (save function above uses GUI form data)
+        # Given single config and config head name (save function above uses GUI form data)
         else: 
             cfg_info_list = []
             cfg_info = configs.ConfigFileInfo(
@@ -909,7 +913,7 @@ class LearningDialog(QtWidgets.QDialog):
             runners.write_pipeline_files(
                 output_dir=tmp_dir.name, # Temporary directory
                 labels_filename=labels_pkg_filename, # .pkg.slp
-                config_info_list=cfg_info_list, # Given config file
+                config_info_list=cfg_info_list, # Given single config file
                 inference_params=pipeline_form_data, 
                 items_for_inference=items_for_inference,
             )
@@ -921,24 +925,92 @@ class LearningDialog(QtWidgets.QDialog):
             root_dir=tmp_dir.name,
         )
 
-        # Find the runs_folder from config_filename
+        # Find the runs_folder from config_filename.
         if config_filename is not None:
             runs_folder = config_filename.outputs.runs_folder
         else:
-            runs_folder = self._cfg_getter.get_first().outputs.runs_folder
+            config_filename = self._cfg_getter.get_first().config
+            runs_folder = config_filename.outputs.runs_folder
+
+        # Open training monitor window. 
+        # Use default ports 9000 and 9001 for controller and publish ports.
+        zmq_ports = dict()
+        zmq_ports["controller_port"] = 9000 # Use default for now
+        zmq_ports["publish_port"] = 9001
+        win = LossViewer(parent=self, zmq_ports=zmq_ports) # Set data channel later
+
+        # Show the LossViewer window after LearningDialog closes
+        win.resize(600, 400)
+        win.show()
+        print("Training monitor window opened.")
+
+        # Reset the LossViewer window w/ plateau patience/min delta & cfg head name.
+        print("Resetting monitor window.")
+        plateau_patience = config_filename.optimization.early_stopping.plateau_patience
+        plateau_min_delta = config_filename.optimization.early_stopping.plateau_min_delta
+        win.reset(
+            # How to get config head name from GUI?
+            what="centroid", 
+            plateau_patience=plateau_patience,
+            plateau_min_delta=plateau_min_delta,
+        )
+        win.setWindowTitle(f"Training Model - centroid")
+        win.set_message(f"Preparing to run training...")
+
+        # Use qasync to schedule the coroutine
+        # loop = QEventLoop(QtCore.QCoreApplication.instance())
+        # asyncio.set_event_loop(loop)
+
+        # Todo: Integrate w/ qasync instead
+        # Schedule the execution of an asynchronous function (run_client) after the current Qt event loop cycle completes
+        # QtCore.QTimer.singleShot(0, lambda: asyncio.run( 
+        #     run_client(
+        #         peer_id="client1",
+        #         DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com",
+        #         port_number=8080,
+        #         file_path=tmp_zip.name,
+        #         CLI=False,
+        #         output_dir=runs_folder,
+        #         config_filename=config_filename,
+        #         cfg_head_name=cfg_head_name,
+        #         loss_viewer=win,  # Pass the LossViewer instance, set datachannel later
+        #     )
+        # ))
+
+        # Close training editor after making training pkg.
+        self.accept()       
+
+        def run_remote_training():
+            asyncio.run(run_client(
+                peer_id="client1",
+                DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com",
+                port_number=8080,
+                file_path=tmp_zip.name,
+                CLI=False,
+                output_dir=runs_folder,
+                config_filename=config_filename,
+                cfg_head_name=cfg_head_name,
+                loss_viewer=win,  # Pass the LossViewer instance, set datachannel later
+            ))
+
+        # Start the async task w/o blocking the UI
+        # QtCore.QTimer.singleShot(0, lambda: asyncio.create_task(run_remote_training()))
+        threading.Thread(target=run_remote_training, daemon=True).start()
+
 
         # Upload to remote worker (GPU cluster).
-        await run_client(
-            peer_id="client1", 
-            DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com", 
-            port_number=8080, 
-            file_path=tmp_zip.name,
-            CLI=False,
-            output_dir=runs_folder,  # where to save the results
-        )
+        # await run_client(
+        #     peer_id="client1", 
+        #     DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com", 
+        #     port_number=8080, 
+        #     file_path=tmp_zip.name,
+        #     CLI=False,
+        #     output_dir=runs_folder,  # where to save the results
+        #     config_filename=config_filename, 
+        #     cfg_head_name=cfg_head_name,
+        # )
 
-        # Close training editor.
-        self.accept()
+        tmp_dir.cleanup()
 
     def export_package(self, output_path: Optional[str] = None, gui: bool = True):
         """Export training job package."""
@@ -1498,6 +1570,8 @@ class TrainingEditorWidget(QtWidgets.QWidget):
 
 def demo_training_dialog():
     app = QtWidgets.QApplication([])
+    loop = QEventLoop(app)
+    asyncio.set_event_loop(loop)
 
     filename = "tests/data/json_format_v1/centered_pair.json"
     labels = Labels.load_file(filename)
@@ -1512,7 +1586,8 @@ def demo_training_dialog():
     # win.training_editor_widget.form_widgets["model"].set_field_enabled("_heads_name", False)
 
     win.show()
-    app.exec_()
+    with loop:
+        app.exec_()
 
 
 if __name__ == "__main__":
