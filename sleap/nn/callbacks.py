@@ -1,5 +1,6 @@
 """Training-related tf.keras callbacks."""
 
+import json
 import jsonpickle
 import logging
 import numpy as np
@@ -64,6 +65,106 @@ class TrainingControllerZMQ(tf.keras.callbacks.Callback):
         if not isinstance(lr, (float, np.float32, np.float64)):
             lr = np.array(lr).astype(np.float64)
         tf.keras.backend.set_value(self.model.optimizer.lr, lr)
+
+
+class ProgressReporterRTC(tf.keras.callbacks.Callback):
+    def __init__(self, rtc_channel=None, what="not_set"):
+        """Initialize the progress reporter with a real-time channel."""
+
+        # Channel must be set and passed from Remote Worker trainer.
+        # This way, the data channel can be used to send progress updates and
+        # does not need to be initialized here.
+        if rtc_channel is None:
+            raise ValueError("RTC channel must be set for ProgressReporterRTC. Cannot be None.")
+
+        self.rtc_channel = rtc_channel
+        self.what = what
+
+        # Callback initialization
+        super().__init__()
+
+    def __del__(self):
+        logger.info(f"Closing the reporter controller.")
+        # No explicit close needed for RTC channel, as it is managed by the Remote Worker.
+
+    def on_train_begin(self, logs=None):
+        """Called at the beginning of training."""
+
+        if self.rtc_channel.readyState == "open":
+            # Send the data through the RTC channel
+            self.rtc_channel.send(
+                "PROGRESS_REPORT::" + 
+                jsonpickle.encode(
+                    dict(what=self.what, event="train_begin", logs=logs)
+                )
+            )
+        else:
+            logger.warning("RTC channel is not open. Cannot send training begin event.")
+
+    def on_batch_begin(self, batch, logs=None):
+        """Called at the beginning of a training batch."""
+
+        if self.rtc_channel.readyState == "open":
+            self.rtc_channel.send(
+                "PROGRESS_REPORT::" + 
+                jsonpickle.encode(
+                    dict(what=self.what, event="batch_begin", batch=batch, logs=logs)
+                )
+            )
+        else:
+            logger.warning("RTC channel is not open. Cannot send batch begin event.")
+
+    def on_batch_end(self, batch, logs=None):
+        """Called at the end of a training batch."""
+
+        if self.rtc_channel.readyState == "open":
+            self.rtc_channel.send(
+                "PROGRESS_REPORT::" + 
+                jsonpickle.encode(
+                    dict(what=self.what, event="batch_end", batch=batch, logs=logs)
+                )
+            )
+        else:
+            logger.warning("RTC channel is not open. Cannot send batch end event.")
+
+    def on_epoch_begin(self, epoch, logs=None):
+        """Called at the start of an epoch."""
+
+        if self.rtc_channel.readyState == "open":
+            self.rtc_channel.send(
+                "PROGRESS_REPORT::" + 
+                jsonpickle.encode(
+                    dict(what=self.what, event="epoch_begin", epoch=epoch, logs=logs)
+                )
+            )
+        else:
+            logger.warning("RTC channel is not open. Cannot send epoch begin event.")
+
+    def on_epoch_end(self, epoch, logs=None):
+        """Called at the end of an epoch."""
+
+        if self.rtc_channel.readyState == "open":
+            self.rtc_channel.send(
+                "PROGRESS_REPORT::" + 
+                jsonpickle.encode(
+                    dict(what=self.what, event="epoch_end", epoch=epoch, logs=logs)
+                )
+            )
+        else:
+            logger.warning("RTC channel is not open. Cannot send epoch end event.")
+
+    def on_train_end(self, logs=None):
+        """Called at the end of training."""
+
+        if self.rtc_channel.readyState == "open":
+            self.rtc_channel.send(
+                "PROGRESS_REPORT::" + 
+                jsonpickle.encode(
+                    dict(what=self.what, event="train_end", logs=logs)
+                )
+            )
+        else:
+            logger.warning("RTC channel is not open. Cannot send training end event.")
 
 
 class ProgressReporterZMQ(tf.keras.callbacks.Callback):
