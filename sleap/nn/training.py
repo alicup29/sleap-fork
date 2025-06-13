@@ -38,6 +38,7 @@ from sleap.nn.callbacks import (
     MatplotlibSaver,
     ModelCheckpointOnEvent,
     ProgressReporterZMQ,
+    ProgressReporterRTC,
     TensorBoardMatplotlibWriter,
     TrainingControllerZMQ,
 )
@@ -88,7 +89,7 @@ from sleap.nn.model import Model
 from sleap.nn.viz import plot_confmaps, plot_peaks
 from sleap.util import get_package_file, plot_img
 
-# sleapRTC
+# SleapRTC
 from sleap_client.client import run_client
 
 logger = logging.getLogger(__name__)
@@ -506,7 +507,8 @@ def setup_output_callbacks(
             callbacks.append(
                 CSVLogger(filename=os.path.join(run_path, "training_log.csv"))
             )
-    callbacks.extend(setup_zmq_callbacks(config.zmq))
+
+    callbacks.extend(setup_zmq_callbacks(config.zmq)) # 4. setup ZMQ callbacks (Worker listener)
     return callbacks
 
 
@@ -860,7 +862,7 @@ class Trainer(ABC):
             )
 
         # Setup output callbacks.
-        self.output_callbacks = setup_output_callbacks(
+        self.output_callbacks = setup_output_callbacks( # 3. Setup output callbacks
             self.config.outputs, run_path=self.run_path
         )
 
@@ -924,7 +926,7 @@ class Trainer(ABC):
         self._setup_pipelines()
         logger.info(f"Setting up optimization...")
         self._setup_optimization()
-        logger.info(f"Setting up outputs...")
+        logger.info(f"Setting up outputs...") # 2. Setup outputs
         self._setup_outputs()
         logger.info(f"Setting up visualization...")
         self._setup_visualization()
@@ -933,7 +935,7 @@ class Trainer(ABC):
     def train(self):
         """Execute the optimization loop to train the model."""
         if self.keras_model is None:
-            self.setup()
+            self.setup() # 1. Start here for initializing ProgressReporterRTC
 
         logger.info(f"Creating tf.data.Datasets for training data generation...")
         t0 = time()
@@ -943,6 +945,7 @@ class Trainer(ABC):
 
         logger.info(f"Starting training loop...")
         t0 = time()
+        logger.info(f"  CALLBACKS:{self.callbacks}")   # 5. Print all callbacks
         self.keras_model.fit(
             training_ds,
             epochs=self.config.optimization.epochs,
@@ -2062,6 +2065,8 @@ def create_trainer_using_cli(args: Optional[List] = None):
                 file_path=args.remote_worker,
                 CLI=False, # refers to sleapRTC Client CLI, not sleap-train CLI
                 output_dir=job_config.outputs.runs_folder, # will use the default output directory
+                config_filename=job_config, # type: TrainingJobConfig
+                cfg_head_name=None, 
             )
         )
         return None
