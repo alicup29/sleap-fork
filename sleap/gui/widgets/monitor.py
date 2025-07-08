@@ -1123,15 +1123,16 @@ class LossViewer(QtWidgets.QMainWindow):
         if self.zmq_ctrl is not None:
             # Send command to stop training.
             logger.info("Sending command to stop training.")
+
             if self.rtc_channel:
                 # If using RTC, send a message to stop training.
                 self.rtc_channel.send(
                     f"ZMQ_CTRL::{jsonpickle.encode(dict(command="stop"))}"
                 )
-            else:
-                # If using ZMQ, send a message to stop training.
-                logger.info("Sending stop command over ZMQ.")
-                self.zmq_ctrl.send_string(jsonpickle.encode(dict(command="stop")))
+            
+            # If using ZMQ, send a message to stop training.
+            logger.info("Sending stop command over ZMQ.")
+            self.zmq_ctrl.send_string(jsonpickle.encode(dict(command="stop")))
 
         # Disable the button to prevent double messages.
         if self.stop_button is not None:
@@ -1140,17 +1141,16 @@ class LossViewer(QtWidgets.QMainWindow):
 
     def _cancel(self):
         """Set the cancel flag."""
+        self.canceled = True
+
         if self.rtc_channel:
-            # If using RTC, send a message to cancel training.
             self.rtc_channel.send(
                 f"ZMQ_CTRL::{jsonpickle.encode(dict(command='cancel'))}"
             )
 
-        else:
-            self.canceled = True
-            if self.cancel_button is not None:
-                self.cancel_button.setText("Canceling...")
-                self.cancel_button.setEnabled(False)
+        if self.cancel_button is not None:
+            self.cancel_button.setText("Canceling...")
+            self.cancel_button.setEnabled(False)
 
     def _unbind(self):
         """Disconnect from all ZMQ sockets."""
