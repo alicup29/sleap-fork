@@ -631,10 +631,7 @@ class LossViewer(QtWidgets.QMainWindow):
         self.canvas = None
         self.reset()
 
-        if data_channel == None:
-            self._setup_zmq(zmq_context)
-        else:
-            self._setup_rtc(data_channel)
+        self._setup_zmq(zmq_context)
 
     def __del__(self):
         self._unbind()
@@ -829,7 +826,7 @@ class LossViewer(QtWidgets.QMainWindow):
         self.ctx_given = zmq_context is not None
         self.ctx = zmq.Context() if zmq_context is None else zmq_context
 
-        # Progress monitoring, SUBSCRIBER
+        # Progress monitoring & RTC forward handling, SUBSCRIBER
         self.sub = self.ctx.socket(zmq.SUB)
         self.sub.subscribe("")
 
@@ -856,6 +853,7 @@ class LossViewer(QtWidgets.QMainWindow):
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self._check_messages)
         self.timer.start(self.message_poll_time_ms)
+        logging.info("Timer started for checking messages every %d ms.", self.message_poll_time_ms)
 
     def _set_batches_to_show(self, batches: str):
         """Set the number of batches to show on the x-axis.
@@ -932,12 +930,40 @@ class LossViewer(QtWidgets.QMainWindow):
             do_update: If True (the default), update the GUI text.
         """
         if self.rtc_channel and rtc_msg != None or self.sub and self.sub.poll(timeout, zmq.POLLIN):
-            if self.rtc_channel:
-                # Receive message from RTC data channel.
-                msg = jsonpickle.decode(rtc_msg)
-            else:
-                # Receive message from ZMQ subscriber.
-                msg = jsonpickle.decode(self.sub.recv_string())
+            # if self.rtc_channel:
+            #     # Receive message from RTC data channel.
+            #     msg = jsonpickle.decode(rtc_msg)
+            # else:
+            #     # Receive message from ZMQ subscriber.
+            #     msg = jsonpickle.decode(self.sub.recv_string())
+
+            # Receive message from ZMQ subscriber.
+            msg = jsonpickle.decode(self.sub.recv_string())
+
+            # Update the monitor remotely with progress reports
+            if msg["event"] == "rtc_update_monitor":
+                # Set the message to the one forwarded over RTC and handle with
+                # the same logic as the ZMQ messages.
+                logging.info("Updating monitor with message: %s", msg)
+                msg = jsonpickle.decode(msg.get("rtc_msg", "No RTC message was given!"))
+
+            # Close the monitor remotely if requested.
+            if msg["event"] == "rtc_close_monitor":
+                logging.info("Closing monitor with message: %s", msg)
+                self.close()
+                return
+
+            # Reset the monitor remotely if requested.
+            if msg["event"] == "rtc_reset_monitor":
+                logging.info("Resetting monitor with message: %s", msg)
+                self.reset(
+                    what=msg.get("what", ""),
+                    plateau_patience=msg.get("plateau_patience", None),
+                    plateau_min_delta=msg.get("plateau_min_delta", None),
+                )
+                self.setWindowTitle(msg.get("window_title", "No title was given!"))
+                self.set_message(msg.get("message", "No message was given!"))
+                return
 
             if msg["event"] == "train_begin":
                 self._set_start_time(perf_counter())
@@ -1123,16 +1149,16 @@ class LossViewer(QtWidgets.QMainWindow):
         if self.zmq_ctrl is not None:
             # Send command to stop training.
             logger.info("Sending command to stop training.")
-
-            if self.rtc_channel:
-                # If using RTC, send a message to stop training.
-                self.rtc_channel.send(
-                    f"ZMQ_CTRL::{jsonpickle.encode(dict(command="stop"))}"
-                )
             
             # If using ZMQ, send a message to stop training.
             logger.info("Sending stop command over ZMQ.")
-            self.zmq_ctrl.send_string(jsonpickle.encode(dict(command="stop")))
+            self.zmq_ctrl.send_string(jsonpickle.encode(dict(command='stop')))
+
+            # If using RTC, send a message to stop training.
+            if self.rtc_channel:
+                self.rtc_channel.send(
+                    f"ZMQ_CTRL::{jsonpickle.encode(dict(command='stop'))}"
+                )
 
         # Disable the button to prevent double messages.
         if self.stop_button is not None:
@@ -1143,14 +1169,14 @@ class LossViewer(QtWidgets.QMainWindow):
         """Set the cancel flag."""
         self.canceled = True
 
-        if self.rtc_channel:
-            self.rtc_channel.send(
-                f"ZMQ_CTRL::{jsonpickle.encode(dict(command='cancel'))}"
-            )
-
         if self.cancel_button is not None:
             self.cancel_button.setText("Canceling...")
             self.cancel_button.setEnabled(False)
+
+        if self.rtc_channel:
+            self.rtc_channel.send(
+                f"ZMQ_CTRL::CANCEL"
+            )
 
     def _unbind(self):
         """Disconnect from all ZMQ sockets."""
