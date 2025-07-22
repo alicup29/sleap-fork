@@ -1,4 +1,6 @@
 """Training functionality and high level APIs."""
+import sys
+sys.path.insert(0, "/Users/amickl/repos/sleap-fork")
 
 import copy
 import json
@@ -11,7 +13,9 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from time import time
 from typing import Callable, List, Optional, Text, TypeVar, Union
+from qtpy import QtWidgets
 
+import asyncio
 import attr
 import cattr
 
@@ -34,14 +38,20 @@ from sleap.nn.callbacks import (
     MatplotlibSaver,
     ModelCheckpointOnEvent,
     ProgressReporterZMQ,
+    ProgressReporterRTC,
     TensorBoardMatplotlibWriter,
     TrainingControllerZMQ,
 )
+
+from sleap.gui.learning.dialog import (
+    LearningDialog
+) 
 
 # Outputs
 # Optimization
 # Data
 # Config
+# sleapRTC
 from sleap.nn.config import (
     CenteredInstanceConfmapsHeadConfig,
     CentroidsHeadConfig,
@@ -78,6 +88,9 @@ from sleap.nn.losses import OHKMLoss, PartLoss
 from sleap.nn.model import Model
 from sleap.nn.viz import plot_confmaps, plot_peaks
 from sleap.util import get_package_file, plot_img
+
+# SleapRTC
+from sleap_client.client import run_client
 
 logger = logging.getLogger(__name__)
 
@@ -494,7 +507,8 @@ def setup_output_callbacks(
             callbacks.append(
                 CSVLogger(filename=os.path.join(run_path, "training_log.csv"))
             )
-    callbacks.extend(setup_zmq_callbacks(config.zmq))
+
+    callbacks.extend(setup_zmq_callbacks(config.zmq)) # 4. setup ZMQ callbacks (Worker listener)
     return callbacks
 
 
@@ -848,7 +862,7 @@ class Trainer(ABC):
             )
 
         # Setup output callbacks.
-        self.output_callbacks = setup_output_callbacks(
+        self.output_callbacks = setup_output_callbacks( # 3. Setup output callbacks
             self.config.outputs, run_path=self.run_path
         )
 
@@ -912,7 +926,7 @@ class Trainer(ABC):
         self._setup_pipelines()
         logger.info(f"Setting up optimization...")
         self._setup_optimization()
-        logger.info(f"Setting up outputs...")
+        logger.info(f"Setting up outputs...") # 2. Setup outputs
         self._setup_outputs()
         logger.info(f"Setting up visualization...")
         self._setup_visualization()
@@ -921,7 +935,7 @@ class Trainer(ABC):
     def train(self):
         """Execute the optimization loop to train the model."""
         if self.keras_model is None:
-            self.setup()
+            self.setup() # 1. Start here for initializing ProgressReporterRTC
 
         logger.info(f"Creating tf.data.Datasets for training data generation...")
         t0 = time()
@@ -931,6 +945,7 @@ class Trainer(ABC):
 
         logger.info(f"Starting training loop...")
         t0 = time()
+        logger.info(f"  CALLBACKS:{self.callbacks}")   # 5. Print all callbacks
         self.keras_model.fit(
             training_ds,
             epochs=self.config.optimization.epochs,
@@ -1901,6 +1916,15 @@ def create_trainer_using_cli(args: Optional[List] = None):
     )
     parser.add_argument("--prefix", default="", help="Prefix to prepend to run name.")
     parser.add_argument("--suffix", default="", help="Suffix to append to run name.")
+    parser.add_argument(
+        "--remote_worker",
+        nargs="?",
+        default="",
+        help=(
+            "Path to training job package or labels file for a remote worker. If specified,"
+            "overrides the path in the training job config."
+        ),
+    )
 
     device_group = parser.add_mutually_exclusive_group(required=False)
     device_group.add_argument(
@@ -1972,8 +1996,8 @@ def create_trainer_using_cli(args: Optional[List] = None):
     logger.info("Versions:")
     sleap.versions()
 
-    logger.info(f"Training labels file: {args.labels_path}")
-    logger.info(f"Training profile: {job_filename}")
+    logger.info(f"Training labels file: {args.labels_path}") # ex. dancing_labels.v001.pkg.slp
+    logger.info(f"Training profile: {job_filename}") # ex. centroid.json
     logger.info("")
 
     # Log configuration to console.
@@ -2032,13 +2056,88 @@ def create_trainer_using_cli(args: Optional[List] = None):
         video_search_paths=args.video_paths,
     )
 
-    return trainer
+    if args.remote_worker != None and args.remote_worker != "" and args.remote_worker.endswith(".zip"):
+        asyncio.run(
+            run_client(
+                peer_id="client1", 
+                DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com", 
+                port_number=8080, 
+                file_path=args.remote_worker,
+                CLI=False, # refers to sleapRTC Client CLI, not sleap-train CLI
+                output_dir=job_config.outputs.runs_folder, # will use the default output directory
+                config_filename=job_config, # type: TrainingJobConfig
+                cfg_head_name=None, 
+            )
+        )
+        return None
+    elif args.remote_worker != "":
+        # Check for labels file
+        if args.labels_path is None:
+            if job_config.data.training_labels is None:
+                raise ValueError(
+                    "No labels file specified in the training job config or CLI arguments."
+                )
+
+        # If running as a remote worker, set up the GUI.
+        run_remote_worker(
+            config_file=job_config, # type: TrainingJobConfig
+            labels_file=args.labels_path, # if not specified, will use the one in job_config
+        )
+        return None
+    else:
+        return trainer
+
+
+def run_remote_worker(config_file: TrainingJobConfig, labels_file: str):
+    """Run a remote worker for training."""
+
+    # Create a QApplication instance to run LearningDialog function.
+    app = QtWidgets.QApplication([]) 
+    dialog = LearningDialog(mode='training', labels_filename=labels_file)
+
+    # Determine the model head type from the configuration.
+    head_config = config_file.model.heads.which_oneof()
+    head_name = ""
+    
+    # Determine output type to create type-specific model trainer.
+    if isinstance(head_config, SingleInstanceConfmapsHeadConfig):
+        head_name = "single_instance"
+    elif isinstance(head_config, CentroidsHeadConfig):
+        head_name = "centroid"
+    elif isinstance(head_config, CenteredInstanceConfmapsHeadConfig):
+        head_name = "centered_instance"
+    elif isinstance(head_config, MultiInstanceConfig):
+        head_name = "multi_instance"
+    elif isinstance(head_config, MultiClassBottomUpConfig):
+        head_name = "multi_class_bottomup"
+    elif isinstance(head_config, MultiClassTopDownConfig):
+        head_name = "multi_class_topdown"
+    else:
+        raise ValueError(
+            "Model head not specified or configured. Check the config.model.heads"
+            " setting."
+        )
+    print(f"---------------Using {head_name} head config---------------")
+
+    asyncio.run(
+        dialog.remote_worker(
+            config_filename=config_file, # pass the TrainingJobConfig object
+            cfg_head_name=head_name, # pass the model head name
+            gui=False, # disable GUI for remote worker since using sleap-train CLI
+        )
+    )
+
+    return 
 
 
 def main(args: Optional[List] = None):
     """Create CLI for training and run."""
     trainer = create_trainer_using_cli(args=args)
-    trainer.train()
+
+    if trainer is None:
+        logger.info("Remote worker finished running.")
+    else:
+        trainer.train()
 
 
 if __name__ == "__main__":
