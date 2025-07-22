@@ -2,12 +2,14 @@
 
 import abc
 import attr
+import asyncio
 import os
 import psutil
 import json
 import subprocess
 import tempfile
 import time
+import threading
 import shutil
 import yaml
 from pathlib import Path
@@ -22,6 +24,7 @@ from sleap.gui.learning.configs import ConfigFileInfo
 from sleap.io.video import SingleImageVideo
 from sleap.nn import training
 from sleap.nn.config import TrainingJobConfig
+from sleap_client.rtc_gui_client import RTCGUIClient
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +385,7 @@ def write_pipeline_files(
     config_info_list: List[ConfigFileInfo],
     inference_params: Dict[str, Any],
     items_for_inference: ItemsForInference,
+    RTC: bool = False,
 ):
     """Writes the config files and scripts for manually running pipeline."""
 
@@ -591,6 +595,72 @@ def run_learning_pipeline(
     new_labeled_frame_count = run_gui_inference(inference_task, items_for_inference)
 
     return new_labeled_frame_count
+
+
+def run_remote_gui_training(
+    labels_filename: str,
+    labels: Labels, 
+    config_info_list: List[ConfigFileInfo],
+    gui: bool = True,
+    file_path: str = None,
+    output_dir: str = None,
+):
+    """
+    Runs remote training (NO INFERENCE) for each training job.
+
+    Args:
+        labels: Labels object from which we'll get training data.
+        config_info_list: List of ConfigFileInfo with configs for training.
+        gui: Whether to show gui windows and process gui events.
+
+    Returns:
+        None
+    """
+
+    zmq_ports = None
+    if gui:
+        from sleap.gui.widgets.monitor import LossViewer
+        from sleap.gui.widgets.imagedir import QtImageDirectoryWidget
+
+        # Use default ports 9000 and 9001 for controller and publish ports.
+        zmq_ports = dict()
+        zmq_ports["controller_port"] = 9000 # Use default for now
+        zmq_ports["publish_port"] = 9001
+
+        # Open training monitor window
+        win = LossViewer(zmq_ports=zmq_ports) # Set data channel later
+
+        # Resize windows
+        win.resize(600, 400)
+        win.show()
+        win.setWindowTitle(f"Connecting to Remote Worker...")
+        win.set_message(f"Preparing to run training...")
+        print("Training monitor window opened.")
+
+    # Instantiate RTCGUIClient.
+    rtc_gui_client = RTCGUIClient(
+        peer_id="client1",
+        DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com",
+        port_number="8080",
+    )
+
+    # Run the client in a separate thread to start the GUI and connect to the server.
+    def run_remote_training():
+        asyncio.run(
+            rtc_gui_client.run_client(
+                file_path=file_path,
+                output_dir=output_dir,
+                zmq_ports=zmq_ports,
+                config_info_list=config_info_list,
+                win=win
+            )
+        )
+
+    # Start the async task w/o blocking the LossViewer UI.
+    # NOT directly updating LossViewer, that is ZMQ responsibility (thread-safe).
+    threading.Thread(target=run_remote_training, daemon=True).start()
+    
+    return
 
 
 def run_gui_training(

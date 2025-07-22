@@ -870,6 +870,7 @@ class LearningDialog(QtWidgets.QDialog):
             ):
                 include_suggestions = True
 
+        # Save dataset with images.
         labels_pkg_filename = str(
             Path(self.labels_filename).with_suffix(".pkg.slp").name
         )
@@ -898,25 +899,27 @@ class LearningDialog(QtWidgets.QDialog):
             self.save(tmp_dir.name, labels_filename=labels_pkg_filename)
 
         # Given single config and config head name (save function above uses GUI form data)
-        else: 
-            cfg_info_list = []
-            cfg_info = configs.ConfigFileInfo(
-                config=config_filename, 
-                filename=config_filename.name, 
-                head_name=cfg_head_name
-            ) 
-            cfg_info_list.append(cfg_info)
 
-            pipeline_form_data = self.pipeline_form_widget.get_form_data()
+        # @#$ Save this logic for separate CLI command, CLI doesn't have GUI access.
+        # else: 
+        #     cfg_info_list = []
+        #     cfg_info = configs.ConfigFileInfo(
+        #         config=config_filename, 
+        #         filename=config_filename.name, 
+        #         head_name=cfg_head_name
+        #     ) 
+        #     cfg_info_list.append(cfg_info)
 
-            # Write pipeline files
-            runners.write_pipeline_files(
-                output_dir=tmp_dir.name, # Temporary directory
-                labels_filename=labels_pkg_filename, # .pkg.slp
-                config_info_list=cfg_info_list, # Given single config file
-                inference_params=pipeline_form_data, 
-                items_for_inference=items_for_inference,
-            )
+        #     pipeline_form_data = self.pipeline_form_widget.get_form_data()
+
+        #     # Write pipeline files
+        #     runners.write_pipeline_files(
+        #         output_dir=tmp_dir.name, # Temporary directory
+        #         labels_filename=labels_pkg_filename, # .pkg.slp
+        #         config_info_list=cfg_info_list, # Given single config file
+        #         inference_params=pipeline_form_data, 
+        #         items_for_inference=items_for_inference,
+        #     )
 
         # Package everything.
         shutil.make_archive(
@@ -932,36 +935,51 @@ class LearningDialog(QtWidgets.QDialog):
             config_filename = self._cfg_getter.get_first().config
             runs_folder = config_filename.outputs.runs_folder
 
-        # Open training monitor window. 
-        # Use default ports 9000 and 9001 for controller and publish ports.
-        zmq_ports = dict()
-        zmq_ports["controller_port"] = 9000 # Use default for now
-        zmq_ports["publish_port"] = 9001
-        win = LossViewer(parent=self, zmq_ports=zmq_ports) # Set data channel later
+
+        # Get all config info from form data (excluding inference)
+        pipeline_form_data = self.pipeline_form_widget.get_form_data()
+        config_info_list = self.get_every_head_config_data(pipeline_form_data)
+        
+
+        self.accept()  # Close the dialog now that we have the data from it
+
+        # Create the LossViewer window here on the main thread before any async functions.
+        # Afternote: not needed since following function part of main thread still
+
+        # Run remote training/learning pipeline using the Training Job package.
+        
+        runners.run_remote_gui_training(
+            labels_filename=self.labels_filename,
+            labels=self.labels,
+            config_info_list=config_info_list,
+            file_path=tmp_zip.name,
+            output_dir=runs_folder
+        )
+
+        # @#$ # Use default ports 9000 and 9001 for controller and publish ports.
+        # zmq_ports = dict()
+        # zmq_ports["controller_port"] = 9000 # Use default for now
+        # zmq_ports["publish_port"] = 9001
+        # win = LossViewer(parent=self, zmq_ports=zmq_ports) # Set data channel later
 
         # Show the LossViewer window after LearningDialog closes
-        win.resize(600, 400)
-        win.show()
-        print("Training monitor window opened.")
+        # win.resize(600, 400)
+        # win.show()
+        # print("Training monitor window opened.")
 
-        # Reset the LossViewer window w/ plateau patience/min delta & cfg head name.
-        print("Resetting monitor window.")
-        plateau_patience = config_filename.optimization.early_stopping.plateau_patience
-        plateau_min_delta = config_filename.optimization.early_stopping.plateau_min_delta
-        win.reset(
-            # How to get config head name from GUI?
-            what="centroid", 
-            plateau_patience=plateau_patience,
-            plateau_min_delta=plateau_min_delta,
-        )
-        win.setWindowTitle(f"Training Model - centroid")
-        win.set_message(f"Preparing to run training...")
+        # @#$ # Reset the LossViewer window w/ plateau patience/min delta & cfg head name.
+        # print("Resetting monitor window.")
+        # plateau_patience = config_filename.optimization.early_stopping.plateau_patience
+        # plateau_min_delta = config_filename.optimization.early_stopping.plateau_min_delta
+        # win.reset(
+        #     # How to get config head name from GUI?
+        #     what="centroid", 
+        #     plateau_patience=plateau_patience, 
+        #     plateau_min_delta=plateau_min_delta, 
+        # )
+        # win.setWindowTitle(f"Training Model - centroid")
+        # win.set_message(f"Preparing to run training remotely...")
 
-        # Use qasync to schedule the coroutine
-        # loop = QEventLoop(QtCore.QCoreApplication.instance())
-        # asyncio.set_event_loop(loop)
-
-        # Todo: Integrate w/ qasync instead
         # Schedule the execution of an asynchronous function (run_client) after the current Qt event loop cycle completes
         # QtCore.QTimer.singleShot(0, lambda: asyncio.run( 
         #     run_client(
@@ -977,25 +995,24 @@ class LearningDialog(QtWidgets.QDialog):
         #     )
         # ))
 
-        # Close training editor after making training pkg.
-        self.accept()       
+        # @#$ # Close training editor after making training pkg.
+        # self.accept()       
 
-        def run_remote_training():
-            asyncio.run(run_client(
-                peer_id="client1",
-                DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com",
-                port_number=8080,
-                file_path=tmp_zip.name,
-                CLI=False,
-                output_dir=runs_folder,
-                config_filename=config_filename,
-                cfg_head_name=cfg_head_name,
-                loss_viewer=win,  # Pass the LossViewer instance, set datachannel later
-            ))
+        # def run_remote_training():
+        #     asyncio.run(run_client(
+        #         peer_id="client1",
+        #         DNS="ws://ec2-54-176-92-10.us-west-1.compute.amazonaws.com",
+        #         port_number=8080,
+        #         file_path=tmp_zip.name,
+        #         CLI=False,
+        #         output_dir=runs_folder,
+        #         config_filename=config_filename,
+        #         cfg_head_name=cfg_head_name,
+        #         loss_viewer=win,  # Pass the LossViewer instance, set datachannel later
+        #     ))
 
-        # Start the async task w/o blocking the UI
-        # QtCore.QTimer.singleShot(0, lambda: asyncio.create_task(run_remote_training()))
-        threading.Thread(target=run_remote_training, daemon=True).start()
+        # # Start the async task w/o blocking the UI
+        # threading.Thread(target=run_remote_training, daemon=True).start()
 
 
         # Upload to remote worker (GPU cluster).
